@@ -224,7 +224,8 @@ public class ImiEvaluationController {
                 "model", openAiModel,
                 "name", "IMI Evaluador Temporal",
                 "instructions", "Eres un experto en madurez industrial. Responde solo en JSON válido en español.",
-                "tools", List.of(Map.of("type", "file_search"))
+                "tools", List.of(Map.of("type", "file_search")),
+                "tool_resources", Map.of("file_search", Map.of("vector_store_ids", List.of(vectorStoreId)))
         )).map(resp -> {
             String id = resp.path("id").asText();
             log.info("Assistant temporal creado: {}", id);
