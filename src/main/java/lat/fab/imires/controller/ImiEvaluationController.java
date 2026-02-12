@@ -142,6 +142,7 @@ public class ImiEvaluationController {
     // =================== 4. Generar Preguntas ===================
     @PostMapping("/generarPreguntas")
     public Mono<ResponseEntity<?>> generarPreguntas(@RequestBody Map<String, String> body) {
+        log.info("=== generarPreguntas === API Key: {}", openAiClient.getApiKeyMasked());
         String descripcion = body.get("descripcion");
 
         String prompt = """
@@ -178,6 +179,7 @@ public class ImiEvaluationController {
     // =================== 5. Analizar Respuestas ===================
     @PostMapping("/analizarRespuestas")
     public Mono<ResponseEntity<?>> analizarRespuestas(@RequestBody Map<String, Object> body) {
+        log.info("=== analizarRespuestas === API Key: {}", openAiClient.getApiKeyMasked());
         String descripcion = (String) body.get("descripcion");
         Map<String, Object> respuestas = (Map<String, Object>) body.get("respuestas");
 

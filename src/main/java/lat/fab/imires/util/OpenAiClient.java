@@ -20,6 +20,7 @@ import java.util.Map;
 public class OpenAiClient {
 
     private final WebClient client;
+    private final String apiKeyMasked;
 
     public OpenAiClient(@Value("${openai.api.key}") String apiKey) {
         this.client = WebClient.builder()
@@ -27,6 +28,12 @@ public class OpenAiClient {
                 .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey)
                 .defaultHeader("OpenAI-Beta", "assistants=v2")
                 .build();
+        // Guardar versión enmascarada (solo últimos 8 caracteres)
+        this.apiKeyMasked = "sk-......" + apiKey.substring(Math.max(0, apiKey.length() - 8));
+    }
+
+    public String getApiKeyMasked() {
+        return apiKeyMasked;
     }
 
     public Mono<JsonNode> post(String path, Object body) {
