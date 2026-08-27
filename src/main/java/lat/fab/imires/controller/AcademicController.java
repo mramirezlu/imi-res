@@ -55,6 +55,7 @@ public class AcademicController {
         return academicRepository.findById(idAcademic)
                 .flatMap(a -> {
                     academic.setImis(a.getImis());
+                    academic.setAdmin(a.isAdmin()); // preserve admin role on profile update
                     return academicRepository.save(academic);
                 });
     }

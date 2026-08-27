@@ -76,6 +76,7 @@ public class ProviderController {
                 .flatMap(p -> {
                     provider.setImis(p.getImis());
                     provider.setServices(p.getServices());
+                    provider.setAdmin(p.isAdmin()); // preserve admin role on profile update
                     return providerRepository.save(provider);
                 });
     }

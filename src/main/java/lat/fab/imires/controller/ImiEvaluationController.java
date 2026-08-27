@@ -2,6 +2,9 @@ package lat.fab.imires.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lat.fab.imires.model.AiEvaluation;
+import lat.fab.imires.repository.DataAiEvaluationRepository;
+import lat.fab.imires.service.PromptService;
 import lat.fab.imires.util.OpenAiClient;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -22,15 +25,24 @@ import java.util.*;
 public class ImiEvaluationController {
 
     private final OpenAiClient openAiClient;
+    private final DataAiEvaluationRepository evaluationRepository;
+    private final PromptService promptService;
     private final String openAiModel;
     private final String vectorStoreId;
     private final String assistantId;
 
+    // How many best-rated past evaluations to inject as few-shot context.
+    private static final int EXAMPLES_LIMIT = 2;
+
     public ImiEvaluationController(OpenAiClient openAiClient,
+                                   DataAiEvaluationRepository evaluationRepository,
+                                   PromptService promptService,
                                    @org.springframework.beans.factory.annotation.Value("${openai.model}") String openAiModel,
                                    @org.springframework.beans.factory.annotation.Value("${openai.vector-store-id}") String vectorStoreId,
                                    @org.springframework.beans.factory.annotation.Value("${openai.assistant-id:}") String assistantId) {
         this.openAiClient = openAiClient;
+        this.evaluationRepository = evaluationRepository;
+        this.promptService = promptService;
         this.openAiModel = openAiModel;
         this.vectorStoreId = vectorStoreId;
         this.assistantId = assistantId;
@@ -88,29 +100,21 @@ public class ImiEvaluationController {
     // =================== 2.5 Crear Assistant permanente ===================
     @PostMapping("/crear-assistant")
     public Mono<ResponseEntity<?>> crearAssistantPermanente() {
-        String instructions = """
-            Eres un experto en madurez industrial basado en el modelo IMI (Industrial Maturity Index).
-
-            REGLAS:
-            - Responde SIEMPRE en español claro y sencillo.
-            - No uses tecnicismos complejos ni palabras como "sistémico", "framework" o "automatización avanzada".
-            - Devuelve SOLO JSON válido, sin explicaciones ni marcas de Markdown como ```json.
-            - Usa los documentos del IMI (modelo de madurez, brechas, cadenas productivas) para fundamentar tus respuestas.
-            """;
-
-        return openAiClient.post("/assistants", Map.of(
-                "model", openAiModel,
-                "name", "IMI Evaluador",
-                "instructions", instructions,
-                "tools", List.of(Map.of("type", "file_search"))
-        )).map(resp -> {
-            String id = resp.path("id").asText();
-            log.info("Assistant permanente creado: {} - Guarda este ID en openai.assistant-id", id);
-            return ResponseEntity.ok(Map.of(
-                    "assistant_id", id,
-                    "mensaje", "Guarda este ID en application.properties: openai.assistant-id=" + id
-            ));
-        });
+        return promptService.getText(PromptService.KEY_ASSISTANT).flatMap(instructions ->
+                openAiClient.post("/assistants", Map.of(
+                        "model", openAiModel,
+                        "name", "IMI Evaluador",
+                        "instructions", instructions,
+                        "tools", List.of(Map.of("type", "file_search"))
+                )).map(resp -> {
+                    String id = resp.path("id").asText();
+                    log.info("Assistant permanente creado: {} - Guarda este ID en openai.assistant-id", id);
+                    return ResponseEntity.ok(Map.of(
+                            "assistant_id", id,
+                            "mensaje", "Guarda este ID en application.properties: openai.assistant-id=" + id
+                    ));
+                })
+        );
     }
 
     // =================== 3. Analizar Empresa ===================
@@ -145,35 +149,25 @@ public class ImiEvaluationController {
         log.info("=== generarPreguntas === API Key: {}", openAiClient.getApiKeyMasked());
         String descripcion = body.get("descripcion");
 
-        String prompt = """
-                Descripción de la empresa:
-                """ + descripcion + """
-
-                Categorías IMI a evaluar:
-                1. Product Management (Product, Design, Fabrication)
-                2. Resources Management (Materials, Energy, Logistics)
-                3. Information Management (Sensing, Processing, Actuator)
-                4. Organization Management (Organization, Impact, Compliance)
-                5. Innovation Management (Innovation, Intellectual property, Training)
-
-                IMPORTANTE: Genera MÍNIMO 1 pregunta por CADA categoría (las 5 categorías deben tener al menos 1 pregunta). Cada pregunta con 4 opciones (puntaje 1-4).
-
-                Formato JSON requerido:
-                {"preguntas": {"Product Management": [{"pregunta": "...", "opciones": [{"texto": "...", "puntaje": 1}, {"texto": "...", "puntaje": 2}, {"texto": "...", "puntaje": 3}, {"texto": "...", "puntaje": 4}]}], "Resources Management": [...], "Information Management": [...], "Organization Management": [...], "Innovation Management": [...]}}
-                """;
-
-        return obtenerAssistantId()
-                .flatMap(assId -> crearThread()
-                        .flatMap(threadId -> enviarMensaje(threadId, prompt)
-                                .then(iniciarRun(assId, threadId))
-                                .flatMap(runId -> esperarRun(threadId, runId)
-                                        .then(obtenerRespuesta(threadId))
-                                        .map(output -> ResponseEntity.ok(
-                                                Map.of("output", limpiarJson(output))
-                                        ))
-                                )
-                        )
-                );
+        return Mono.zip(contextoParaPreguntas(), promptService.getText(PromptService.KEY_PREGUNTAS))
+                .flatMap(tuple -> {
+                    String prompt = tuple.getT1()
+                            + "Descripción de la empresa:\n" + descripcion + "\n\n"
+                            + tuple.getT2() + "\n\n"
+                            + "Formato JSON requerido:\n" + PromptService.FORMATO_PREGUNTAS;
+                    return obtenerAssistantId()
+                            .flatMap(assId -> crearThread()
+                                    .flatMap(threadId -> enviarMensaje(threadId, prompt)
+                                            .then(iniciarRun(assId, threadId))
+                                            .flatMap(runId -> esperarRun(threadId, runId)
+                                                    .then(obtenerRespuesta(threadId))
+                                                    .map(output -> ResponseEntity.ok(
+                                                            Map.of("output", limpiarJson(output))
+                                                    ))
+                                            )
+                                    )
+                            );
+                });
     }
 
     // =================== 5. Analizar Respuestas ===================
@@ -183,37 +177,85 @@ public class ImiEvaluationController {
         String descripcion = (String) body.get("descripcion");
         Map<String, Object> respuestas = (Map<String, Object>) body.get("respuestas");
 
-        String prompt = """
-            Empresa: """ + descripcion + """
-
-            Respuestas: """ + formatearRespuestas(respuestas) + """
-
-            Genera análisis IMI con puntaje (1-4) y justificación por subcategoría, recomendación por categoría, y recomendacion_general motivadora (con ejemplos de empresas y datos de digitalización).
-
-            JSON requerido:
-            {"resumen": "...", "puntajes": {"Product Management": {"Product": {"puntaje": N, "justificacion": "..."}, "Design": {...}, "Fabrication": {...}}, "Resources Management": {"Materials": {...}, "Energy": {...}, "Logistics": {...}}, "Information Management": {"Sensing": {...}, "Processing": {...}, "Actuator": {...}}, "Organization Management": {"Organization": {...}, "Impact": {...}, "Compliance": {...}}, "Innovation Management": {"Innovation": {...}, "Intellectual property": {...}, "Training": {...}}}, "recomendaciones": {"Product Management": "...", "Resources Management": "...", "Information Management": "...", "Organization Management": "...", "Innovation Management": "..."}, "recomendacion_general": "..."}
-            """;
-
-        return obtenerAssistantId()
-                .flatMap(assId -> crearThread()
-                        .flatMap(threadId -> enviarMensaje(threadId, prompt)
-                                .then(iniciarRun(assId, threadId))
-                                .flatMap(runId -> esperarRun(threadId, runId)
-                                        .then(obtenerRespuesta(threadId))
-                                        .map(output -> {
-                                            String limpio = output.trim()
-                                                    .replaceAll("^```json", "")
-                                                    .replaceAll("```$", "")
-                                                    .replaceAll("【[^】]+】", "");
-                                            return ResponseEntity.ok(
-                                                    Map.of("output", limpiarJson(limpio))
-                                            );
-                                        })
-                                )
-                        )
-                );
+        return Mono.zip(contextoParaAnalisis(), promptService.getText(PromptService.KEY_ANALISIS))
+                .flatMap(tuple -> {
+                    String prompt = tuple.getT1()
+                            + "Empresa: " + descripcion + "\n\n"
+                            + "Respuestas: " + formatearRespuestas(respuestas) + "\n\n"
+                            + tuple.getT2() + "\n\n"
+                            + "JSON requerido:\n" + PromptService.FORMATO_ANALISIS;
+                    return obtenerAssistantId()
+                            .flatMap(assId -> crearThread()
+                                    .flatMap(threadId -> enviarMensaje(threadId, prompt)
+                                            .then(iniciarRun(assId, threadId))
+                                            .flatMap(runId -> esperarRun(threadId, runId)
+                                                    .then(obtenerRespuesta(threadId))
+                                                    .map(output -> {
+                                                        String limpio = output.trim()
+                                                                .replaceAll("^```json", "")
+                                                                .replaceAll("```$", "")
+                                                                .replaceAll("【[^】]+】", "");
+                                                        return ResponseEntity.ok(
+                                                                Map.of("output", limpiarJson(limpio))
+                                                        );
+                                                    })
+                                            )
+                                    )
+                            );
+                });
     }
 
+
+    // =================== Few-shot context (best-rated evaluations) ===================
+    private Mono<List<AiEvaluation>> mejoresEjemplos() {
+        return evaluationRepository.findByFeedbackNotNullOrderByFeedbackDescCreatedAtDesc()
+                .take(EXAMPLES_LIMIT)
+                .collectList();
+    }
+
+    private Mono<String> contextoParaPreguntas() {
+        return mejoresEjemplos().map(ejemplos -> {
+            if (ejemplos.isEmpty()) return "";
+            StringBuilder sb = new StringBuilder();
+            sb.append("EJEMPLOS DE REFERENCIA (evaluaciones previas mejor valoradas por usuarios). ")
+              .append("Úsalos SOLO como guía de estilo, calidad y formato de las preguntas y opciones; ")
+              .append("NO los copies, adapta todo a la empresa actual.\n\n");
+            int i = 1;
+            for (AiEvaluation e : ejemplos) {
+                sb.append("Ejemplo ").append(i++).append(":\n")
+                  .append("Empresa: ").append(e.getDescripcion()).append("\n")
+                  .append("Preguntas: ").append(toJson(e.getPreguntas())).append("\n\n");
+            }
+            sb.append("--- Fin de ejemplos ---\n\n");
+            return sb.toString();
+        });
+    }
+
+    private Mono<String> contextoParaAnalisis() {
+        return mejoresEjemplos().map(ejemplos -> {
+            if (ejemplos.isEmpty()) return "";
+            StringBuilder sb = new StringBuilder();
+            sb.append("EJEMPLOS DE REFERENCIA (evaluaciones previas mejor valoradas por usuarios). ")
+              .append("Úsalos SOLO como guía de estilo, profundidad y formato del análisis; ")
+              .append("NO los copies, adapta todo a la empresa actual.\n\n");
+            int i = 1;
+            for (AiEvaluation e : ejemplos) {
+                sb.append("Ejemplo ").append(i++).append(":\n")
+                  .append("Empresa: ").append(e.getDescripcion()).append("\n")
+                  .append("Análisis: ").append(toJson(e.getResultado())).append("\n\n");
+            }
+            sb.append("--- Fin de ejemplos ---\n\n");
+            return sb.toString();
+        });
+    }
+
+    private String toJson(Object o) {
+        try {
+            return objectMapper.writeValueAsString(o);
+        } catch (Exception e) {
+            return String.valueOf(o);
+        }
+    }
 
     // =================== Helpers ===================
     private Mono<String> obtenerAssistantId() {

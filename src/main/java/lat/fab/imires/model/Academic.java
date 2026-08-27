@@ -25,4 +25,7 @@ public class Academic {
     private List<String> extraUrls;
     private List<String> countries;
     private List<Imi> imis;
+    private boolean admin;
+    private Double latitude;
+    private Double longitude;
 }

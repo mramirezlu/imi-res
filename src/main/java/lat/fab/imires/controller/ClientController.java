@@ -25,6 +25,10 @@ public class ClientController {
     private final MongoProviderRepository providerRepository;
     private final AtomicLong counter = new AtomicLong();
 
+    // Affinity tier width: providers whose affinity falls in the same tier are
+    // considered "similar" and then ordered by proximity. Adjustable.
+    private static final int AFFINITY_BUCKET = 3;
+
     public ClientController(
             MongoClientRepository clientRepository,
             MongoProviderRepository providerRepository) {
@@ -73,6 +77,7 @@ public class ClientController {
         return clientRepository.findById(idClient)
                 .flatMap(c -> {
                     client.setImis(c.getImis());
+                    client.setAdmin(c.isAdmin()); // preserve admin role on profile update
                     return clientRepository.save(client);
                 });
     }
@@ -129,30 +134,74 @@ public class ClientController {
                     return this.providerRepository.findSuggestedProviders(c, 3);
                 })
                 .sort((p1, p2) -> {
-                    // choose top 8 providers: 'the ones who fill the most gap'
-                    int diff1 = 0;
-                    int diff2 = 0;
+                    // Rank by affinity first (who fills the most gap); once we have
+                    // coordinates, order providers of similar affinity by proximity.
+                    Client client = wrapper.client;
+                    Imi clientLastImi = client.getImis().get(client.getImis().size() - 1);
 
-                    Imi clientLastImi = wrapper.client.getImis().get(wrapper.client.getImis().size() - 1);
+                    int aff1 = affinity(p1, clientLastImi);
+                    int aff2 = affinity(p2, clientLastImi);
 
-                    for (Map.Entry<Integer, Integer> entry :
-                            p1.getImis().get(p1.getImis().size() - 1).getVars().entrySet()) {
-                        int diff = entry.getValue() - clientLastImi.getVars().get(entry.getKey()); // provider value - client value
-                        if (diff > 0) {
-                            diff1 += diff;
-                        }
+                    boolean clientHasCoords = client.getLatitude() != null && client.getLongitude() != null;
+                    if (!clientHasCoords) {
+                        return aff2 - aff1; // no client location → affinity only (previous behavior)
                     }
 
-                    for (Map.Entry<Integer, Integer> entry :
-                            p2.getImis().get(p2.getImis().size() - 1).getVars().entrySet()) {
-                        int diff = entry.getValue() - clientLastImi.getVars().get(entry.getKey()); // provider value - client value
-                        if (diff > 0) {
-                            diff2 += diff;
-                        }
+                    // Affinity by tiers; within the same tier, the closest provider first.
+                    int level1 = aff1 / AFFINITY_BUCKET;
+                    int level2 = aff2 / AFFINITY_BUCKET;
+                    if (level1 != level2) {
+                        return level2 - level1; // higher affinity tier first
                     }
-                    return diff2 - diff1;
+                    double d1 = distance(client, p1);
+                    double d2 = distance(client, p2);
+                    if (Double.compare(d1, d2) != 0) {
+                        return Double.compare(d1, d2); // closer first (providers w/o coords sink to the end)
+                    }
+                    return aff2 - aff1; // finer affinity tie-break within same tier & distance
                 })
-                .take(8); // best 8 providers
+                .take(8) // best 8 providers
+                .map(p -> {
+                    Client client = wrapper.client;
+                    if (client.getLatitude() != null && client.getLongitude() != null
+                            && p.getLatitude() != null && p.getLongitude() != null) {
+                        double km = haversineKm(client.getLatitude(), client.getLongitude(),
+                                p.getLatitude(), p.getLongitude());
+                        p.setDistanceKm((int) Math.round(km));
+                    }
+                    return p;
+                });
+    }
+
+    // Affinity = how much the provider exceeds the client across all IMI areas (sum of positive diffs).
+    private int affinity(Provider p, Imi clientLastImi) {
+        int sum = 0;
+        Imi last = p.getImis().get(p.getImis().size() - 1);
+        for (Map.Entry<Integer, Integer> entry : last.getVars().entrySet()) {
+            int diff = entry.getValue() - clientLastImi.getVars().get(entry.getKey());
+            if (diff > 0) {
+                sum += diff;
+            }
+        }
+        return sum;
+    }
+
+    // Distance in km between client and provider; MAX_VALUE if the provider has no coordinates.
+    private double distance(Client c, Provider p) {
+        if (p.getLatitude() == null || p.getLongitude() == null) {
+            return Double.MAX_VALUE;
+        }
+        return haversineKm(c.getLatitude(), c.getLongitude(), p.getLatitude(), p.getLongitude());
+    }
+
+    private double haversineKm(double lat1, double lon1, double lat2, double lon2) {
+        double earthRadiusKm = 6371;
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
     // returns array containing 5 axes for radar chart

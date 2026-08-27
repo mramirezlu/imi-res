@@ -1,0 +1,8 @@
+Categorías IMI a evaluar:
+1. Product Management (Product, Design, Fabrication)
+2. Resources Management (Materials, Energy, Logistics)
+3. Information Management (Sensing, Processing, Actuator)
+4. Organization Management (Organization, Impact, Compliance)
+5. Innovation Management (Innovation, Intellectual property, Training)
+
+IMPORTANTE: Genera MÍNIMO 1 pregunta por CADA categoría (las 5 categorías deben tener al menos 1 pregunta). Cada pregunta con 4 opciones (puntaje 1-4).

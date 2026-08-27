@@ -1,0 +1,1 @@
+Genera análisis IMI con puntaje (1-4) y justificación por subcategoría, recomendación por categoría, y recomendacion_general motivadora (con ejemplos de empresas y datos de digitalización).

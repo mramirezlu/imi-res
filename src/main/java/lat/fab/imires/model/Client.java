@@ -25,5 +25,8 @@ public class Client {
     private List<String> countries;
     private List<String> industries;
     private List<Imi> imis;
+    private boolean admin;
+    private Double latitude;
+    private Double longitude;
 
 }
